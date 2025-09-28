@@ -1,0 +1,184 @@
+     1                                  ; boot/boot.asm — 读取内核 -> 采集E820 -> 进PM -> 显示PJ -> 跳 0x1000
+     2                                  [bits 16]
+     3                                  [org 0x7C00]
+     4                                  
+     5                                  %ifndef KERNEL_SECTORS
+     6                                      %define KERNEL_SECTORS 32
+     7                                  %endif
+     8                                  
+     9                                  KERNEL_LOAD_SEG equ 0x0000
+    10                                  KERNEL_LOAD_OFF equ 0x1000
+    11                                  
+    12                                  %macro PUTCH 1
+    13                                      mov ah, 0x0E
+    14                                      mov al, %1
+    15                                      mov bh, 0
+    16                                      mov bl, 0x07
+    17                                      int 0x10
+    18                                  %endmacro
+    19                                  
+    20                                  start:
+    21 00000000 FA                          cli
+    22 00000001 31C0                        xor ax, ax
+    23 00000003 8ED8                        mov ds, ax
+    24 00000005 8EC0                        mov es, ax
+    25 00000007 8ED0                        mov ss, ax
+    26 00000009 BC007C                      mov sp, 0x7C00
+    27 0000000C 8816[2501]                  mov [BootDrive], dl
+    28                                  
+    29                                      PUTCH 'A'
+    13 00000010 B40E                <1>  mov ah, 0x0E
+    14 00000012 B041                <1>  mov al, %1
+    15 00000014 B700                <1>  mov bh, 0
+    16 00000016 B307                <1>  mov bl, 0x07
+    17 00000018 CD10                <1>  int 0x10
+    30                                  
+    31                                      ; 关闭 NMI（CMOS 索引端口 0x70 的 bit7 = 1）
+    32 0000001A E470                        in   al, 0x70
+    33 0000001C 0C80                        or   al, 0x80
+    34 0000001E E670                        out  0x70, al
+    35                                  
+    36                                      ; 开 A20（端口 0x92）
+    37 00000020 E492                        in  al, 0x92
+    38 00000022 0C02                        or  al, 0000_0010b
+    39 00000024 E692                        out 0x92, al
+    40                                  
+    41                                      ; ---------- E820（写到 0000:5000，计数到 0x4FF0） ----------
+    42 00000026 31C0                        xor ax, ax
+    43 00000028 8EC0                        mov es, ax
+    44 0000002A BF0050                      mov di, 0x5000
+    45 0000002D 6631DB                      xor ebx, ebx
+    46 00000030 C706F04F0000                mov word [0x4FF0], 0
+    47                                  .e820_loop:
+    48 00000036 66B820E80000                mov eax, 0xE820
+    49 0000003C 66BA50414D53                mov edx, 0x534D4150
+    50 00000042 66B918000000                mov ecx, 24
+    51 00000048 CD15                        int 0x15
+    52 0000004A 7214                        jc  .e820_done
+    53 0000004C 663D50414D53                cmp eax, 0x534D4150
+    54 00000052 750C                        jne .e820_done
+    55 00000054 83C718                      add di, 24
+    56 00000057 FF06F04F                    inc word [0x4FF0]
+    57 0000005B 6685DB                      test ebx, ebx
+    58 0000005E 75D6                        jnz .e820_loop
+    59                                  .e820_done:
+    60                                  
+    61                                      ; ---------- 读内核到 0000:1000 ----------
+    62 00000060 B80000                      mov ax, KERNEL_LOAD_SEG
+    63 00000063 8EC0                        mov es, ax
+    64 00000065 BB0010                      mov bx, KERNEL_LOAD_OFF
+    65 00000068 E86100                      call read_kernel_chs
+    66 0000006B 7223                        jc   .read_fail
+    67                                      PUTCH 'C'
+    13 0000006D B40E                <1>  mov ah, 0x0E
+    14 0000006F B043                <1>  mov al, %1
+    15 00000071 B700                <1>  mov bh, 0
+    16 00000073 B307                <1>  mov bl, 0x07
+    17 00000075 CD10                <1>  int 0x10
+    68                                  
+    69 00000077 EB00                        jmp  .enter_pm
+    70                                  
+    71                                  .enter_pm:
+    72                                      ; 切换到保护模式
+    73 00000079 0F0116[1F01]                lgdt [gdt_descriptor]
+    74 0000007E 0F20C0                      mov eax, cr0
+    75 00000081 6683C801                    or  eax, 1
+    76 00000085 0F22C0                      mov cr0, eax
+    77                                      ; 16->32 远跳：66 EA imm32:imm16
+    78 00000088 66EA                        db 0x66, 0xEA
+    79 0000008A [9D000000]                  dd pm_entry
+    80 0000008E 0800                        dw CODE_SEL
+    81                                  
+    82                                  .read_fail:
+    83                                      PUTCH 'E'
+    13 00000090 B40E                <1>  mov ah, 0x0E
+    14 00000092 B045                <1>  mov al, %1
+    15 00000094 B700                <1>  mov bh, 0
+    16 00000096 B307                <1>  mov bl, 0x07
+    17 00000098 CD10                <1>  int 0x10
+    84 0000009A F4                      .hang16: hlt
+    85 0000009B EBFD                        jmp .hang16
+    86                                  
+    87                                  ; ----------------------------
+    88                                  ; 32-bit Protected Mode
+    89                                  ; ----------------------------
+    90                                  [bits 32]
+    91                                  pm_entry:
+    92 0000009D 66B81000                    mov ax, DATA_SEL
+    93 000000A1 8ED8                        mov ds, ax
+    94 000000A3 8EC0                        mov es, ax
+    95 000000A5 8EE0                        mov fs, ax
+    96 000000A7 8EE8                        mov gs, ax
+    97 000000A9 8ED0                        mov ss, ax
+    98 000000AB BC00000900                  mov esp, 0x90000
+    99                                  
+   100                                      ; 左上角 'PJ'
+   101 000000B0 66C70500800B00500F          mov word [0xB8000 + 0*2], 0x0F50      ; 'P'
+   102 000000B9 66C70502800B004A0F          mov word [0xB8000 + 1*2], 0x0F4A      ; 'J'
+   103                                  
+   104                                      ; 跳到 0x1000 执行 C 内核
+   105 000000C2 B800100000                  mov eax, 0x00001000
+   106 000000C7 FFE0                        jmp eax
+   107                                  
+   108 000000C9 F4                      .hang32: hlt
+   109 000000CA EBFD                        jmp .hang32
+   110                                  
+   111                                  ; ----------------------------
+   112                                  ; CHS 读 若干扇区到 ES:BX
+   113                                  ; ----------------------------
+   114                                  [bits 16]
+   115                                  read_kernel_chs:
+   116 000000CC 60                          pusha
+   117 000000CD B400                        mov ah, 0x00
+   118 000000CF 8A16[2501]                  mov dl, [BootDrive]
+   119 000000D3 CD13                        int 0x13
+   120                                  
+   121 000000D5 B402                        mov ah, 0x02
+   122 000000D7 B00A                        mov al, KERNEL_SECTORS
+   123 000000D9 B500                        mov ch, 0
+   124 000000DB B600                        mov dh, 0
+   125 000000DD B102                        mov cl, 2
+   126 000000DF 8A16[2501]                  mov dl, [BootDrive]
+   127 000000E3 CD13                        int 0x13
+   128 000000E5 731A                        jnc .ok
+   129                                      ; retry
+   130 000000E7 B400                        mov ah, 0x00
+   131 000000E9 8A16[2501]                  mov dl, [BootDrive]
+   132 000000ED CD13                        int 0x13
+   133 000000EF B402                        mov ah, 0x02
+   134 000000F1 B00A                        mov al, KERNEL_SECTORS
+   135 000000F3 B500                        mov ch, 0
+   136 000000F5 B600                        mov dh, 0
+   137 000000F7 B102                        mov cl, 2
+   138 000000F9 8A16[2501]                  mov dl, [BootDrive]
+   139 000000FD CD13                        int 0x13
+   140 000000FF 7203                        jc .fail
+   141 00000101 61                      .ok:  popa
+   142 00000102 F8                           clc
+   143 00000103 C3                           ret
+   144                                  .fail:
+   145 00000104 61                           popa
+   146 00000105 F9                           stc
+   147 00000106 C3                           ret
+   148                                  
+   149                                  ; ----------------------------
+   150                                  ; GDT（null + code + data）
+   151                                  ; ----------------------------
+   152                                  [bits 16]
+   153                                  gdt_start:
+   154 00000107 0000000000000000            dq 0x0000000000000000
+   155 0000010F FFFF0000009ACF00            dq 0x00CF9A000000FFFF           ; code base=0, limit=4G
+   156 00000117 FFFF00000092CF00            dq 0x00CF92000000FFFF           ; data base=0, limit=4G
+   157                                  gdt_end:
+   158                                  gdt_descriptor:
+   159 0000011F 1700                        dw gdt_end - gdt_start - 1
+   160 00000121 [07010000]                  dd gdt_start
+   161                                  
+   162                                  CODE_SEL equ 0x08
+   163                                  DATA_SEL equ 0x10
+   164                                  
+   165 00000125 00                      BootDrive: db 0
+   166                                  
+   167 00000126 00<rep D8h>             times 510 - ($ - $$) db 0
+   168 000001FE 55AA                    dw 0xAA55
+   169                                  
